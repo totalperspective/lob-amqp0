@@ -34,21 +34,52 @@
       (assoc :conn nil)
       (assoc :chan nil)))
 
-(defrecord Subscription [chan tag]
+(defrecord MessageIn [chan src dst meta payload]
+  msg/Message
+  (-id [_]
+    (:message-id meta))
+  (-source [_]
+    src)
+  (-destination [_]
+    dst)
+  (-content-type [_]
+    (:content-type meta))
+  (-headers [_]
+    (:headers meta))
+  (-content [_])
+  msg/Ackable
+  (-ack! [_]
+    (lb/ack chan (:delivery-tag meta)))
+  msg/Nackable
+  (-nack! [_]
+    (lb/nack chan (:delivery-tag meta) false true)))
+
+(defrecord PushSubscription [chan tag]
   link/Subscription
   (-unsubscribe! [_]
     (lb/cancel chan tag)))
 
+(defrecord PullSubscription [chan src sub-id]
+  link/Subscription
+  (-unsubscribe! [_])
+  link/Receiver
+  (-receive! [_]
+    (let [[metadata payload] (lb/get chan sub-id)]
+      (->MessageIn chan src sub-id meta payload))))
+
 (defrecord Publication [link chan key sub-id pub-id]
   link/Publication
   (-subscribe! [_ buffer-size callback]
-    (let [opts {}
-          tag (lc/subscribe chan
-                            sub-id
-                            (fn [ch meta ^bytes payload])
-                            opts)]
-      (lb/qos chan buffer-size) ;; TODO: This is not right
-      (->Subcription chan tag)))
+    (let [opts {}]
+      (if callback
+        (let [tag (lc/subscribe chan
+                                sub-id
+                                (fn [ch meta ^bytes payload]
+                                  (callback (->MessageIn chan (link/id link) sub-id meta payload)))
+                                opts)]
+          (lb/qos chan buffer-size) ;; TODO: This is not right
+          (->PushSubscription chan tag))
+        (->PullSubscription chan (link/id link) sub-id))))
   link/Sender
   (-send! [_ msg]
     (if (link/closed? link)
