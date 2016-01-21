@@ -84,8 +84,10 @@
   (-send! [_ msg]
     (if (link/closed? link)
       false
-      (let [content (msg/content msg) ;; FIXME: This is not right at all
-            opts {:content-type (msg/content-type)}]
+      (let [id (msg/id msg)
+            content (str (msg/content msg)) ;; FIXME: Needs encoding
+            opts {:content-type (msg/content-type)
+                  :message-id id}]
         (lb/publish chan pub-id (str key) content opts)))))
 
 (defrecord Link [config state]
