@@ -64,21 +64,27 @@
   (-unsubscribe! [_])
   link/Receiver
   (-receive! [_]
-    (let [[metadata payload] (lb/get chan sub-id)]
-      (->MessageIn chan src sub-id meta payload))))
+    (let [[metadata ^bytes payload] (lb/get chan sub-id false)]
+      (when payload
+        (->MessageIn chan src sub-id metadata (String. payload "UTF-8"))))))
 
 (defrecord Publication [link chan key sub-id pub-id]
   link/Publication
   (-subscribe! [_ buffer-size callback]
-    (let [opts {}]
-      (if callback
-        (let [tag (lc/subscribe chan
-                                sub-id
-                                (fn [ch meta ^bytes payload]
-                                  (callback (->MessageIn chan (link/id link) sub-id meta payload)))
-                                opts)]
-          (lb/qos chan buffer-size) ;; TODO: This is not right
-          (->PushSubscription chan tag))
+    (let [opts {:auto-ack false}]
+      (if (fn? callback)
+        (do
+          (lb/qos chan buffer-size)
+          (let [tag (lc/subscribe chan
+                                  sub-id
+                                  (fn [ch meta ^bytes payload]
+                                    (callback (->MessageIn chan
+                                                           (link/id link)
+                                                           sub-id
+                                                           meta
+                                                           (String. payload "UTF-8"))))
+                                  opts)]
+            (->PushSubscription chan tag)))
         (->PullSubscription chan (link/id link) sub-id))))
   link/Sender
   (-send! [_ msg]
@@ -86,12 +92,14 @@
       false
       (let [id (msg/id msg)
             content (str (msg/content msg)) ;; FIXME: Needs encoding
-            opts {:content-type (msg/content-type)
+            opts {:content-type (msg/content-type msg)
                   :message-id id}]
-        (lb/publish chan pub-id (str key) content opts)))))
+        (lb/publish chan "" pub-id content opts)))))
 
 (defrecord Link [config state]
   link/Link
+  (-id [_]
+    (:host config))
   (-open! [_]
     (swap! state open! config)
     true)
