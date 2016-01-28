@@ -6,7 +6,8 @@
             [langohr.basic :as lb]
             [langohr.exchange  :as le]
             [lob.link :as link]
-            [lob.message :as msg]))
+            [lob.message :as msg]
+            [com.stuartsierra.component :as component]))
 
 (defn connect [config conn]
   (if conn
@@ -46,7 +47,8 @@
     (:content-type meta))
   (-headers [_]
     (:headers meta))
-  (-content [_])
+  (-content [_]
+    payload)
   msg/Ackable
   (-ack! [_]
     (lb/ack chan (:delivery-tag meta)))
@@ -57,7 +59,10 @@
 (defrecord PushSubscription [chan tag]
   link/Subscription
   (-unsubscribe! [_]
-    (lb/cancel chan tag)))
+    (try
+      (lb/cancel chan tag)
+      (catch Exception e
+        nil))))
 
 (defrecord PullSubscription [chan src sub-id]
   link/Subscription
@@ -94,7 +99,23 @@
             content (str (msg/content msg)) ;; FIXME: Needs encoding
             opts {:content-type (msg/content-type msg)
                   :message-id id}]
-        (lb/publish chan "" pub-id content opts)))))
+        (lb/publish chan "" pub-id content opts))))
+  component/Lifecycle
+  (start [this]
+    (if chan
+      this
+      (if-let [pub (link/publication link pub-id)]
+        pub
+        (throw (ex-info "Could not create publication"
+                        {:link link
+                         :link-closed? (link/closed? link)
+                         :pub-id pub-id})))))
+  (stop [this]
+    (map->Publication {:link link
+                       :pub-id pub-id})))
+
+(defn publication [id]
+  (map->Publication {:pub-id id}))
 
 (defrecord Link [config state]
   link/Link
@@ -126,7 +147,17 @@
               (->Publication this chan key queue id)))
           (do
             (lq/declare chan id config)
-            (->Publication this chan key id id)))))))
+            (->Publication this chan key id id))))))
+  component/Lifecycle
+  (start [this]
+    (println (link/closed? this))
+    (when (link/closed? this)
+      (link/open! this))
+    this)
+  (stop [this]
+    (when-not (link/closed? this)
+      (link/close! this))
+    this))
 
 (defn create-link [config]
   (->Link config (atom {})))
