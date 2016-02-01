@@ -6,7 +6,8 @@
             [langohr.basic :as lb]
             [langohr.exchange  :as le]
             [lob.link :as link]
-            [lob.message :as msg]))
+            [lob.message :as msg]
+            [com.stuartsierra.component :as component]))
 
 (defn connect [config conn]
   (if conn
@@ -46,7 +47,8 @@
     (:content-type meta))
   (-headers [_]
     (:headers meta))
-  (-content [_])
+  (-content [_]
+    payload)
   msg/Ackable
   (-ack! [_]
     (lb/ack chan (:delivery-tag meta)))
@@ -57,28 +59,37 @@
 (defrecord PushSubscription [chan tag]
   link/Subscription
   (-unsubscribe! [_]
-    (lb/cancel chan tag)))
+    (try
+      (lb/cancel chan tag)
+      (catch Exception e
+        nil))))
 
 (defrecord PullSubscription [chan src sub-id]
   link/Subscription
   (-unsubscribe! [_])
   link/Receiver
   (-receive! [_]
-    (let [[metadata payload] (lb/get chan sub-id)]
-      (->MessageIn chan src sub-id meta payload))))
+    (let [[metadata ^bytes payload] (lb/get chan sub-id false)]
+      (when payload
+        (->MessageIn chan src sub-id metadata (String. payload "UTF-8"))))))
 
 (defrecord Publication [link chan key sub-id pub-id]
   link/Publication
   (-subscribe! [_ buffer-size callback]
-    (let [opts {}]
-      (if callback
-        (let [tag (lc/subscribe chan
-                                sub-id
-                                (fn [ch meta ^bytes payload]
-                                  (callback (->MessageIn chan (link/id link) sub-id meta payload)))
-                                opts)]
-          (lb/qos chan buffer-size) ;; TODO: This is not right
-          (->PushSubscription chan tag))
+    (let [opts {:auto-ack false}]
+      (if (fn? callback)
+        (do
+          (lb/qos chan buffer-size)
+          (let [tag (lc/subscribe chan
+                                  sub-id
+                                  (fn [ch meta ^bytes payload]
+                                    (callback (->MessageIn chan
+                                                           (link/id link)
+                                                           sub-id
+                                                           meta
+                                                           (String. payload "UTF-8"))))
+                                  opts)]
+            (->PushSubscription chan tag)))
         (->PullSubscription chan (link/id link) sub-id))))
   link/Sender
   (-send! [_ msg]
@@ -86,12 +97,30 @@
       false
       (let [id (msg/id msg)
             content (str (msg/content msg)) ;; FIXME: Needs encoding
-            opts {:content-type (msg/content-type)
+            opts {:content-type (msg/content-type msg)
                   :message-id id}]
-        (lb/publish chan pub-id (str key) content opts)))))
+        (lb/publish chan "" pub-id content opts))))
+  component/Lifecycle
+  (start [this]
+    (if chan
+      this
+      (if-let [pub (link/publication link pub-id)]
+        pub
+        (throw (ex-info "Could not create publication"
+                        {:link link
+                         :link-closed? (link/closed? link)
+                         :pub-id pub-id})))))
+  (stop [this]
+    (map->Publication {:link link
+                       :pub-id pub-id})))
+
+(defn publication [id]
+  (map->Publication {:pub-id id}))
 
 (defrecord Link [config state]
   link/Link
+  (-id [_]
+    (:host config))
   (-open! [_]
     (swap! state open! config)
     true)
@@ -118,7 +147,16 @@
               (->Publication this chan key queue id)))
           (do
             (lq/declare chan id config)
-            (->Publication this chan key id id)))))))
+            (->Publication this chan key id id))))))
+  component/Lifecycle
+  (start [this]
+    (when (link/closed? this)
+      (link/open! this))
+    this)
+  (stop [this]
+    (when-not (link/closed? this)
+      (link/close! this))
+    this))
 
 (defn create-link [config]
   (->Link config (atom {})))
