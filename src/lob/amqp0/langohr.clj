@@ -150,7 +150,6 @@
             (->Publication this chan key id id))))))
   component/Lifecycle
   (start [this]
-    (println (link/closed? this))
     (when (link/closed? this)
       (link/open! this))
     this)
